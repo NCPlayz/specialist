@@ -115,7 +115,7 @@ def browse(page: str) -> None:
     class RequestHandler(http.server.BaseHTTPRequestHandler):
         """A simple handler for a single web page."""
 
-        def do_GET(self) -> None:  # pylint: disable = invalid-name
+        def do_GET(self) -> None:
             """Serve the given HTML."""
             self.send_response(200)
             self.end_headers()

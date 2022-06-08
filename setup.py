@@ -1,13 +1,12 @@
-# pylint: disable = missing-module-docstring
 import pathlib
-import setuptools  # type: ignore
+import setuptools
 
 README = pathlib.Path(__file__).parent / "README.md"
 setuptools.setup(
     author="Brandt Bucher",
     author_email="brandt@python.org",
     description="Visualize CPython 3.11's specializing, adaptive interpreter.",
-    entry_points={"console_scripts": ["specialist=specialist:main"]},
+    entry_points={"console_scripts": ["specialist=specialist.__main__:main"]},
     license="MIT",
     long_description=README.read_text(),
     long_description_content_type="text/markdown",

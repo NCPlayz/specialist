@@ -27,6 +27,7 @@ import contextlib
 import dataclasses
 import dis
 import html
+import json
 import http.server
 import importlib.util
 import itertools
@@ -42,8 +43,16 @@ FIRST_POSTION = (1, 0)
 LAST_POSITION = (sys.maxsize, 0)
 SPECIALIZED_INSTRUCTIONS = frozenset(opcode._specialized_instructions)  # type: ignore [attr-defined] # pylint: disable = protected-access
 
+T_co = typing.TypeVar('T_co', covariant=True)
 
-class HTMLWriter:
+class Writer(typing.Protocol):
+    def add(self, source: str, stats: "Stats") -> None:
+        ...
+
+    def emit(self) -> str:
+        ...
+
+class HTMLWriter(Writer):
     """Write HTML for a source code view."""
 
     def __init__(self, *, blue: bool, dark: bool) -> None:
@@ -90,6 +99,22 @@ class HTMLWriter:
         saturation = 1
         rgb = colorsys.hls_to_rgb(hue, lightness, saturation)
         return f"#{int(255 * rgb[0]):02x}{int(255 * rgb[1]):02x}{int(255 * rgb[2]):02x}"
+
+class JSONWriter(Writer):
+    def __init__(self, *, indent: int | str | None = None) -> None:
+        self._indent = indent
+        self._data = []
+
+    def add(self, source: str, stats: "Stats") -> None:
+        self._data.append({
+            "source": source,
+            "stats": dataclasses.asdict(stats),
+        })
+
+    def emit(self) -> str:
+        """Emit the JSON data"""
+        return json.dumps({"data": self._data}, indent=self._indent)
+
 
 
 def is_superinstruction(instruction: dis.Instruction) -> bool:
@@ -236,16 +261,7 @@ def get_code_for_path(path: pathlib.Path) -> types.CodeType | None:
             pass
     return None
 
-
-def view(
-    path: pathlib.Path,
-    *,
-    blue: bool = False,
-    dark: bool = False,
-    out: pathlib.Path | None,
-) -> None:
-    """View a code object's source code."""
-    writer = HTMLWriter(blue=blue, dark=dark)
+def read(path: pathlib.Path) -> typing.Iterable[typing.Tuple[str, Stats]]:
     code = get_code_for_path(path)
     assert code is not None
     parser = parse(code)
@@ -255,12 +271,26 @@ def view(
         for lineno, line in enumerate(file, 1):
             for col_offset, character in enumerate(line):
                 if chunk.stop == (lineno, col_offset):
-                    writer.add(group.decode("utf-8"), chunk.stats)
+                    yield group.decode("utf-8"), chunk.stats
                     group.clear()
                     chunk = next(parser)
                     assert chunk.start == (lineno, col_offset)
                 group.append(character)
-    writer.add(group.decode("utf-8"), chunk.stats)
+    yield group.decode("utf-8"), chunk.stats
+
+def view(
+    path: pathlib.Path,
+    *,
+    writer: typing.Optional[Writer] = None,
+    out: pathlib.Path | None,
+) -> None:
+    """View a code object's source code."""
+    if writer is None:
+        writer = HTMLWriter(blue=False, dark=False)
+
+    for source, stats in read(path):
+        writer.add(source, stats)
+
     written = writer.emit()
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -296,6 +326,8 @@ class Args(typing.TypedDict):
 
     blue: bool
     dark: bool
+    json: bool
+    indent: int
     output: pathlib.Path | None
     targets: str | None
     command: typing.Sequence[str]
@@ -312,6 +344,9 @@ def parse_args(args: list[str] | None = None) -> Args:
     )
     options.add_argument(
         "-d", "--dark", action="store_true", help="Use a dark color scheme."
+    )
+    options.add_argument(
+        "--json", action="store_true", help="Return the data in JSON format"
     )
     options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit."
@@ -368,9 +403,15 @@ def main() -> None:
     args = parse_args()
     blue = args["blue"]
     dark = args["dark"]
+    json = args["json"]
+    indent = args["indent"]
     output = args["output"]
     targets = args["targets"]
     path: pathlib.Path | None
+
+    if json and (blue or dark):
+        print("Cannot have theme arguments enabled with '--json'!", sys.stderr)
+
     with tempfile.TemporaryDirectory() as work:
         match args:
             case {"command": [source, *argv], "module": [], "file": []}:
@@ -418,7 +459,9 @@ def main() -> None:
             else:
                 path_and_out = ((path, None) for path in paths)
             for path, out in path_and_out:
-                view(path, blue=blue, dark=dark, out=out)
+                if json:
+                    writer = JSONWriter()
+                view(path, out=out)
         if caught:
             raise caught[0] from None
 

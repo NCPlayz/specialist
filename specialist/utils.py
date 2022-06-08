@@ -11,7 +11,7 @@ def catch_exceptions() -> typing.Generator[list[BaseException], None, None]:
     caught: list[BaseException] = []
     try:
         yield caught
-    except BaseException as exception:  # pylint: disable = broad-except
+    except BaseException as exception:
         caught.append(exception)
 
 

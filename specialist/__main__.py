@@ -37,7 +37,10 @@ def parse_args(args: list[str] | None = None) -> Args:
         "--json", action="store_true", help="Return the data in JSON format."
     )
     options.add_argument(
-        "-I", "--indent", help="Indent the JSON format data.", type=int,
+        "-I",
+        "--indent",
+        help="Indent the JSON format data.",
+        type=int,
     )
     options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit."
@@ -158,5 +161,5 @@ def main() -> None:
         raise caught[0] from None
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

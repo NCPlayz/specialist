@@ -2,15 +2,20 @@ import collections
 import dis
 import http.server
 import itertools
+import os
 import pathlib
+import runpy
 import sys
+import tempfile
 import typing
 import types
 import webbrowser
 
+
 from . import CODE
-from .stats import Stats, SourceChunk
 from .instructions import score_instruction
+from .stats import Stats, SourceChunk
+from .utils import catch_exceptions, main_file_for_module, patch_sys_argv
 from .writers import Writer, HTMLWriter
 
 FIRST_POSTION = (1, 0)
@@ -68,7 +73,11 @@ def get_code_for_path(path: pathlib.Path) -> types.CodeType | None:
     return None
 
 
-def read(path: pathlib.Path) -> typing.Iterable[typing.Tuple[str, Stats]]:
+AnalysisResults = typing.Iterable[typing.Tuple[str, Stats]]
+
+
+def _read(path: pathlib.Path) -> AnalysisResults:
+    """Read the code and accumulate the results."""
     code = get_code_for_path(path)
     assert code is not None
     parser = parse(code)
@@ -86,27 +95,96 @@ def read(path: pathlib.Path) -> typing.Iterable[typing.Tuple[str, Stats]]:
     yield group.decode("utf-8"), chunk.stats
 
 
+def _process_analysis(
+    path: typing.Optional[pathlib.Path],
+    targets: typing.List[pathlib.Path],
+    caught: typing.List[BaseException],
+):
+    paths = []
+
+    if targets:
+        for target in targets:
+            if get_code_for_path(target) is not None:
+                paths.append(target.resolve())
+    elif path is not None:
+        paths.append(path.resolve())
+
+    if not paths:
+        raise FileNotFoundError("No source files found!")
+
+    if caught:
+        raise caught[0] from None
+
+    return paths
+
+
+PathToResults = typing.Dict[pathlib.Path, AnalysisResults]
+
+
+def analyze_code(
+    code: str, /, *argv: str, targets: typing.List[pathlib.Path]
+) -> PathToResults:
+    with tempfile.TemporaryDirectory() as work:
+        path = pathlib.Path(work) / "__main__.py"
+        path.write_text(code)
+        with patch_sys_argv(argv), catch_exceptions() as caught:
+            runpy.run_path(str(path), run_name="__main__")
+
+        paths = _process_analysis(path, targets, caught)
+        return {p: _read(p) for p in paths}
+
+
+def analyze_module(
+    module: str, /, *argv: str, targets: typing.List[pathlib.Path]
+) -> PathToResults:
+    with patch_sys_argv(argv), catch_exceptions() as caught:
+        runpy.run_module(module, run_name="__main__")
+    path = main_file_for_module(module)
+    paths = _process_analysis(path, targets, caught)
+    return {p: _read(p) for p in paths}
+
+
+def analyze_file(
+    source: str, /, *argv: str, targets: typing.List[pathlib.Path]
+) -> PathToResults:
+    with patch_sys_argv(argv), catch_exceptions() as caught:
+        runpy.run_path(source, run_name="__main__")
+    path = pathlib.Path(source)
+    paths = _process_analysis(path, targets, caught)
+    return {p: _read(p) for p in paths}
+
+
 def view(
-    path: pathlib.Path,
+    results: PathToResults,
     *,
     writer: typing.Optional[Writer] = None,
-    out: pathlib.Path | None,
+    out_dir: pathlib.Path | None,
 ) -> None:
     """View a code object's source code."""
     if writer is None:
         writer = HTMLWriter(blue=False, dark=False)
 
-    for source, stats in read(path):
-        writer.add(source, stats)
+    common_path = pathlib.Path(os.path.commonpath(list(results.keys()))).resolve()
+    if out_dir is not None:
+        out_dir = out_dir.resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    written = writer.emit()
-    if out is not None:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.unlink(missing_ok=True)
-        out.write_text(written)
-        print(f"{path} -> {out}")
-    else:
-        browse(written)
+    for p, r in results.items():
+        writer = writer.copy()
+
+        for source, stats in r:
+            writer.add(source, stats)
+
+        written = writer.emit()
+
+        if out_dir is not None:
+            out_file = out_dir / p.relative_to(common_path).with_suffix(
+                f".{writer.EXTENSION}"
+            )
+            out_file.unlink(missing_ok=True)
+            out_file.write_text(written)
+        else:
+            browse(written)
 
 
 def browse(page: str) -> None:

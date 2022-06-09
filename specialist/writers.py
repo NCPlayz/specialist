@@ -3,20 +3,28 @@ import dataclasses
 import html
 import json
 import typing
+from typing_extensions import Self
 
 from .stats import Stats
 
 
 class Writer(typing.Protocol):
+    EXTENSION: typing.ClassVar[str]
+
     def add(self, source: str, stats: "Stats") -> None:
         ...
 
     def emit(self) -> str:
         ...
 
+    def copy(self) -> Self:
+        ...
+
 
 class HTMLWriter(Writer):
     """Write HTML for a source code view."""
+
+    EXTENSION: typing.ClassVar[str] = "html"
 
     def __init__(self, *, blue: bool, dark: bool) -> None:
         self._blue = blue
@@ -45,6 +53,9 @@ class HTMLWriter(Writer):
         """Emit the HTML."""
         return "".join([*self._parts, "</pre></body></html>"])
 
+    def copy(self) -> Self:
+        return HTMLWriter(blue=self._blue, dark=self._dark)
+
     def _color(self, stats: "Stats") -> str:
         """Compute an RGB color code for this chunk."""
         quickened = stats.specialized + stats.adaptive
@@ -65,6 +76,8 @@ class HTMLWriter(Writer):
 
 
 class JSONWriter(Writer):
+    EXTENSION: typing.ClassVar[str] = "json"
+
     def __init__(self, *, indent: int | str | None = None) -> None:
         self._indent = indent
         self._data = []
@@ -80,3 +93,6 @@ class JSONWriter(Writer):
     def emit(self) -> str:
         """Emit the JSON data"""
         return json.dumps({"data": self._data}, indent=self._indent)
+
+    def copy(self) -> Self:
+        return JSONWriter(indent=self._indent)

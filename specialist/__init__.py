@@ -5,6 +5,7 @@ import typing
 
 if sys.version_info < (3, 11) or sys.implementation.name != "cpython":
     raise RuntimeError("Specialist only supports CPython 3.11+!")
+
 CODE = set()
 
 

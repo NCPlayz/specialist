@@ -1,5 +1,4 @@
 import colorsys
-import dataclasses
 import html
 import json
 import typing
@@ -75,20 +74,37 @@ class HTMLWriter(Writer):
         return f"#{int(255 * rgb[0]):02x}{int(255 * rgb[1]):02x}{int(255 * rgb[2]):02x}"
 
 
+class JSONStats(typing.TypedDict):
+    specialized: int
+    adaptive: int
+    unquickened: int
+
+
+class JSONPayload(typing.TypedDict):
+    source: str
+    stats: JSONStats
+
+
 class JSONWriter(Writer):
     EXTENSION: typing.ClassVar[str] = "json"
 
     def __init__(self, *, indent: int | str | None = None) -> None:
         self._indent = indent
-        self._data = []
+        self._data: typing.List[JSONPayload] = []
+
+    @staticmethod
+    def as_dict(source: str, stats: "Stats") -> JSONPayload:
+        return {
+            "source": source,
+            "stats": {
+                "specialized": stats.specialized,
+                "adaptive": stats.adaptive,
+                "unquickened": stats.unquickened,
+            },
+        }
 
     def add(self, source: str, stats: "Stats") -> None:
-        self._data.append(
-            {
-                "source": source,
-                "stats": dataclasses.asdict(stats),
-            }
-        )
+        self._data.append(self.as_dict(source, stats))
 
     def emit(self) -> str:
         """Emit the JSON data"""

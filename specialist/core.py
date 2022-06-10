@@ -1,6 +1,6 @@
 import collections
 import dis
-import http.server
+import inspect
 import itertools
 import os
 import pathlib
@@ -9,28 +9,36 @@ import sys
 import tempfile
 import typing
 import types
-import webbrowser
-
 
 from . import CODE
 from .instructions import score_instruction
 from .stats import Stats, SourceChunk
-from .utils import catch_exceptions, main_file_for_module, patch_sys_argv
+from .utils import (
+    catch_exceptions,
+    main_file_for_module,
+    patch_sys_argv,
+    browse,
+    get_code_for_path,
+    validate_targets,
+    audit_imports,
+)
+
+from .watch import WatchMonitor, DEFAULT_WATCH_PORT
 from .writers import Writer, HTMLWriter
 
 FIRST_POSTION = (1, 0)
 LAST_POSITION = (sys.maxsize, 0)
 
 
-def walk_code(code: types.CodeType) -> typing.Generator[types.CodeType, None, None]:
+def _walk_code(code: types.CodeType) -> typing.Generator[types.CodeType, None, None]:
     """Walk a code object, yielding all of its sub-code objects."""
     yield code
     for constant in code.co_consts:
         if isinstance(constant, types.CodeType):
-            yield from walk_code(constant)
+            yield from _walk_code(constant)
 
 
-def parse(code: types.CodeType) -> typing.Generator[SourceChunk, None, None]:
+def _parse(code: types.CodeType) -> typing.Generator[SourceChunk, None, None]:
     """Parse a code object's source code into SourceChunks."""
     events: collections.defaultdict[tuple[int, int], Stats] = collections.defaultdict(
         Stats
@@ -38,7 +46,7 @@ def parse(code: types.CodeType) -> typing.Generator[SourceChunk, None, None]:
     events[FIRST_POSTION] = Stats()
     events[LAST_POSITION] = Stats()
     previous = None
-    for child in walk_code(code):
+    for child in _walk_code(code):
         # dis has a bug in how position information is computed for CACHEs:
         fixed_positions = list(child.co_positions())
         for instruction in dis.get_instructions(child, adaptive=True):
@@ -62,25 +70,14 @@ def parse(code: types.CodeType) -> typing.Generator[SourceChunk, None, None]:
         yield SourceChunk(start, stop, stats)
 
 
-def get_code_for_path(path: pathlib.Path) -> types.CodeType | None:
-    """Get the code object for a file."""
-    for code in CODE:
-        try:
-            if path.samefile(code.co_filename):
-                return code
-        except FileNotFoundError:
-            pass
-    return None
+AnalysisResults = typing.Tuple[str, Stats]
 
 
-AnalysisResults = typing.Iterable[typing.Tuple[str, Stats]]
-
-
-def _read(path: pathlib.Path) -> AnalysisResults:
+def _read(path: pathlib.Path) -> typing.Iterable[AnalysisResults]:
     """Read the code and accumulate the results."""
     code = get_code_for_path(path)
     assert code is not None
-    parser = parse(code)
+    parser = _parse(code)
     chunk = next(parser)
     group = bytearray()
     with path.open("rb") as file:
@@ -92,6 +89,7 @@ def _read(path: pathlib.Path) -> AnalysisResults:
                     chunk = next(parser)
                     assert chunk.start == (lineno, col_offset)
                 group.append(character)
+
     yield group.decode("utf-8"), chunk.stats
 
 
@@ -100,17 +98,7 @@ def _process_analysis(
     targets: typing.List[pathlib.Path],
     caught: typing.List[BaseException],
 ):
-    paths = []
-
-    if targets:
-        for target in targets:
-            if get_code_for_path(target) is not None:
-                paths.append(target.resolve())
-    elif path is not None:
-        paths.append(path.resolve())
-
-    if not paths:
-        raise FileNotFoundError("No source files found!")
+    paths = validate_targets(path, targets)
 
     if caught:
         raise caught[0] from None
@@ -118,15 +106,17 @@ def _process_analysis(
     return paths
 
 
-PathToResults = typing.Dict[pathlib.Path, AnalysisResults]
+PathToResults = typing.Dict[pathlib.Path, typing.Iterable[AnalysisResults]]
 
 
 def analyze_code(
     code: str, /, *argv: str, targets: typing.List[pathlib.Path]
 ) -> PathToResults:
+    sys.addaudithook(audit_imports)
     with tempfile.TemporaryDirectory() as work:
         path = pathlib.Path(work) / "__main__.py"
         path.write_text(code)
+
         with patch_sys_argv(argv), catch_exceptions() as caught:
             runpy.run_path(str(path), run_name="__main__")
 
@@ -139,6 +129,7 @@ def analyze_module(
 ) -> PathToResults:
     with patch_sys_argv(argv), catch_exceptions() as caught:
         runpy.run_module(module, run_name="__main__")
+
     path = main_file_for_module(module)
     paths = _process_analysis(path, targets, caught)
     return {p: _read(p) for p in paths}
@@ -147,11 +138,31 @@ def analyze_module(
 def analyze_file(
     source: str, /, *argv: str, targets: typing.List[pathlib.Path]
 ) -> PathToResults:
+    sys.addaudithook(audit_imports)
     with patch_sys_argv(argv), catch_exceptions() as caught:
         runpy.run_path(source, run_name="__main__")
+
     path = pathlib.Path(source)
     paths = _process_analysis(path, targets, caught)
     return {p: _read(p) for p in paths}
+
+
+def watch(
+    *, targets: typing.List[pathlib.Path] = [], port: int = DEFAULT_WATCH_PORT
+) -> None:
+    sys.addaudithook(audit_imports)
+
+    curr = inspect.currentframe()
+    assert curr is not None
+
+    prev = curr.f_back
+    assert prev is not None
+
+    CODE.add(prev.f_code)
+    filename = prev.f_code.co_filename
+
+    paths = validate_targets(pathlib.Path(filename), targets)
+    WatchMonitor(paths, port=port).start()
 
 
 def view(
@@ -185,23 +196,3 @@ def view(
             out_file.write_text(written)
         else:
             browse(written)
-
-
-def browse(page: str) -> None:
-    """Open a web browser to display a page."""
-
-    class RequestHandler(http.server.BaseHTTPRequestHandler):
-        """A simple handler for a single web page."""
-
-        def do_GET(self) -> None:
-            """Serve the given HTML."""
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(page.encode("utf-8"))
-
-        def log_request(self, *_: object) -> None:
-            """Don't log requests."""
-
-    with http.server.HTTPServer(("localhost", 0), RequestHandler) as server:
-        webbrowser.open_new_tab(f"http://localhost:{server.server_port}")
-        server.handle_request()
